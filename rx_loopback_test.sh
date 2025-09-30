@@ -1,36 +1,37 @@
 #!/usr/bin/env bash
 
-readonly BPFFS_DIR=/sys/fs/bpf/test
-
-readonly INIT_NETNS=/tmp/init-netns.$$
-readonly TEST_NETNS=/tmp/test-netns.$$
+BPFFS_DIR=
+INIT_NETNS=
+TEST_NETNS=
 
 set_up_before_script()
 {
-    mkdir $BPFFS_DIR
+    BPFFS_DIR=$(mktemp -d -p /sys/fs/bpf bashunit_XXXXXX)
+    assert_is_directory $BPFFS_DIR
+
     $BPFTOOL prog loadall progs.bpf.o $BPFFS_DIR
 }
 
 tear_down_after_script()
 {
-    rm -r /sys/fs/bpf/test
+    rm -r $BPFFS_DIR
 }
 
 set_up() {
     local old_netns=$(readlink /proc/self/ns/net)
 
     # Pin current netns
-    touch "$INIT_NETNS"
+    INIT_NETNS=$(temp_file)
     mount --bind /proc/self/ns/net "$INIT_NETNS"
 
     # Create and enter test netns
-    touch "$TEST_NETNS"
+    TEST_NETNS=$(temp_file)
     unshare --net="$TEST_NETNS" ip link set dev lo up
     cd "$TEST_NETNS" # 'cd' is overloaded to call setns(2)
 
     local new_netns=$(readlink /proc/self/ns/net)
     assert_not_same "$old_netns" "$new_netns"
-    
+
     sysctl -w net.ipv4.conf.lo.log_martians=1
 }
 
@@ -39,12 +40,10 @@ tear_down() {
 
     # Unpin test netns
     umount "$TEST_NETNS"
-    rm "$TEST_NETNS"
 
     # Return to initial netns and unpin it
     cd "$INIT_NETNS"
     umount "$INIT_NETNS"
-    rm "$INIT_NETNS"
 
     local new_netns=$(readlink /proc/self/ns/net)
     assert_not_same "$old_netns" "$new_netns"
@@ -87,7 +86,7 @@ drop_test() {
     local tcx_prog="$1"
 
     set_test_title "$FUNCNAME: $tcx_prog"
-    
+
     $BPFTOOL net attach xdpgeneric  pinned $BPFFS_DIR/xdp_fill_meta_and_pass dev lo
     $BPFTOOL net attach tcx_ingress pinned $BPFFS_DIR/$tcx_prog dev lo
     $BPFTOOL net attach tcx_ingress pinned $BPFFS_DIR/tcx_dump_meta_1 dev lo
@@ -108,7 +107,7 @@ test_tcx_grow_room_1b() {
 }
 
 # expands head
-test_tcx_grow_room_256b() { 
+test_tcx_grow_room_256b() {
     drop_test $FUNCNAME
 }
 
@@ -155,7 +154,7 @@ ping_test() {
 
     clear_trace $BPFFS_DIR/tcx_dump_meta_1
     clear_trace $BPFFS_DIR/tcx_dump_meta_2
-    
+
     ping -c 1 -w 1 127.0.0.1
     assert_successful_code
 
