@@ -181,3 +181,210 @@ test_ping_change_proto() {
     skip "echo request dropped due to martian destination, why?" && return
     ping_test test_tcx_change_proto_to_6 test_tcx_change_proto_to_4
 }
+
+decap_vlan_test() {
+    local fill_prog="$BPFFS_DIR/xdp_fill_meta_and_pass"
+    local dump1_prog="$1"
+    local dump2_prog="$2"
+    local push_prog="$3"
+    local pull_prog="$4"
+
+    # VLAN setup
+    local peer_netns="ns_$(random_str 3)"
+
+    ip netns add $peer_netns
+    trap "trap - RETURN; ip netns del $peer_netns" RETURN
+
+    sysctl -q net.ipv6.conf.all.disable_ipv6=1
+    ip netns exec $peer_netns sysctl -q net.ipv6.conf.all.disable_ipv6=1
+
+    ip link add name veth0 address 02:00:00:00:00:01 type veth \
+       peer name veth1 address 02:00:00:00:00:02 netns $peer_netns
+
+    ethtool -K veth0 rx-vlan-hw-parse off
+    ethtool -K veth0 tx-vlan-hw-insert off
+
+    ip netns exec $peer_netns ethtool -K veth1 rx-vlan-hw-parse off
+    ip netns exec $peer_netns ethtool -K veth1 tx-vlan-hw-insert off
+
+    ip link set dev veth0 up
+    ip link add name vlan0 link veth0 type vlan id 42
+    ip addr add 10.0.0.1/24 dev vlan0
+    ip link set dev vlan0 up
+    ip neigh add 10.0.0.2 lladdr 02:00:00:00:00:02 nud permanent dev vlan0
+
+    ip -n $peer_netns link set dev veth1 up
+    ip -n $peer_netns link add name vlan1 link veth1 type vlan id 42
+    ip -n $peer_netns addr add 10.0.0.2/24 dev vlan1
+    ip -n $peer_netns link set dev vlan1 up
+    ip -n $peer_netns neigh add 10.0.0.1 lladdr 02:00:00:00:00:01 nud permanent dev vlan1
+
+    # BPF setup
+    $BPFTOOL net attach xdpgeneric  pinned $fill_prog dev veth0
+    [[ "$push_prog"  ]] && $BPFTOOL net attach tcx_ingress pinned $push_prog  dev vlan0
+    $BPFTOOL net attach tcx_ingress pinned $dump1_prog dev vlan0
+    [[ "$pull_prog"  ]] && $BPFTOOL net attach tcx_ingress pinned $pull_prog  dev vlan0
+    [[ "$dump2_prog" ]] && $BPFTOOL net attach tcx_ingress pinned $dump2_prog dev vlan0
+
+    clear_trace $fill_prog
+    [[ "$push_prog" ]] && clear_trace $push_prog
+    clear_trace $dump1_prog
+    [[ "$pull_prog" ]] && clear_trace $pull_prog
+    [[ "$dump2_prog" ]] && clear_trace $dump2_prog
+
+    # Test
+    ip netns exec $peer_netns ping -c 1 -w 1 10.0.0.1
+    assert_successful_code
+
+    check_error $fill_prog
+    [[ "$push_prog" ]] && check_error $push_prog
+    check_error $dump1_prog
+    [[ "$pull_prog" ]] && check_error $pull_prog
+    [[ "$dump2_prog" ]] && check_error $dump2_prog
+
+    check_trace $dump1_prog want_meta.txt
+    [[ "$dump2_prog" ]] && check_trace $dump2_prog want_meta.txt
+
+    return 0 # mask the error from last [[ ]] test
+}
+
+test_decap_vlan_dynptr()
+{
+    set_test_title $FUNCNAME
+    decap_vlan_test $BPFFS_DIR/tcx_dump_meta_1
+}
+
+test_decap_vlan_pktptr()
+{
+    set_test_title $FUNCNAME
+    decap_vlan_test $BPFFS_DIR/tcx_dump_meta_pktptr
+}
+
+test_decap_vlan_adjust_room_1b()
+{
+    set_test_title $FUNCNAME
+    decap_vlan_test \
+        $BPFFS_DIR/tcx_dump_meta_1 \
+        $BPFFS_DIR/tcx_dump_meta_2 \
+        $BPFFS_DIR/test_tcx_grow_room_1b \
+        $BPFFS_DIR/test_tcx_shrink_room_1b
+}
+
+test_decap_qinq() {
+    set_test_title $FUNCNAME
+
+    # VLAN setup
+    local peer_netns="ns_$(random_str 3)"
+
+    ip netns add $peer_netns
+    trap "trap - RETURN; ip netns del $peer_netns" RETURN
+
+    sysctl -q net.ipv6.conf.all.disable_ipv6=1
+    ip netns exec $peer_netns sysctl -q net.ipv6.conf.all.disable_ipv6=1
+
+    ip link add name veth0 address 02:00:00:00:00:01 type veth \
+       peer name veth1 address 02:00:00:00:00:02 netns $peer_netns
+
+    ethtool -K veth0 rx-vlan-hw-parse off
+    ethtool -K veth0 tx-vlan-hw-insert off
+    ethtool -K veth0 rx-vlan-stag-hw-parse off
+    ethtool -K veth0 tx-vlan-stag-hw-insert off
+
+    ip netns exec $peer_netns ethtool -K veth1 rx-vlan-hw-parse off
+    ip netns exec $peer_netns ethtool -K veth1 tx-vlan-hw-insert off
+    ip netns exec $peer_netns ethtool -K veth1 rx-vlan-stag-hw-parse off
+    ip netns exec $peer_netns ethtool -K veth1 tx-vlan-stag-hw-insert off
+
+    ip link set dev veth0 up
+    ip -n $peer_netns link set dev veth1 up
+
+    ip link add name vlan00 link veth0 type vlan proto 802.1ad id 100
+    ip link set dev vlan00 up
+    ip link add name vlan0 link vlan00 type vlan proto 802.1q id 200
+    ip link set dev vlan0 up
+
+    ip addr add 10.0.0.1/24 dev vlan0
+    ip neigh add 10.0.0.2 lladdr 02:00:00:00:00:02 nud permanent dev vlan0
+
+    ip -n $peer_netns link add name vlan11 link veth1 type vlan proto 802.1ad id 100
+    ip -n $peer_netns link set dev vlan11 up
+    ip -n $peer_netns link add name vlan1 link vlan11 type vlan proto 802.1q id 200
+    ip -n $peer_netns link set dev vlan1 up
+
+    ip -n $peer_netns addr add 10.0.0.2/24 dev vlan1
+    ip -n $peer_netns neigh add 10.0.0.1 lladdr 02:00:00:00:00:01 nud permanent dev vlan1
+
+    # BPF setup
+    $BPFTOOL net attach xdpgeneric  pinned $BPFFS_DIR/xdp_fill_meta_and_pass dev veth0
+    $BPFTOOL net attach tcx_ingress pinned $BPFFS_DIR/tcx_dump_meta_1 dev vlan0
+
+    clear_trace $BPFFS_DIR/xdp_fill_meta_and_pass
+    clear_trace $BPFFS_DIR/tcx_dump_meta_1
+
+    # Test
+    ip netns exec $peer_netns ping -c 1 -w 1 10.0.0.1
+    assert_successful_code
+
+    check_error $BPFFS_DIR/xdp_fill_meta_and_pass
+    check_error $BPFFS_DIR/tcx_dump_meta_1
+
+    check_trace $BPFFS_DIR/tcx_dump_meta_1 want_meta.txt
+}
+
+test_decap_gre4() {
+    set_test_title $FUNCNAME
+
+    # netns setup
+    local peer_netns="ns_$(random_str 3)"
+    local nsA=
+    local nsB="-n ${peer_netns}"
+    local inA=
+    local inB="ip netns exec ${peer_netns}"
+
+    ip netns add $peer_netns
+    trap "trap - RETURN; ip netns del $peer_netns" RETURN
+
+    # VLAN setup
+    $inA sysctl -q net.ipv6.conf.all.disable_ipv6=1
+    $inB sysctl -q net.ipv6.conf.all.disable_ipv6=1
+
+    ip link add name veth0 address 02:00:00:00:00:01 type veth \
+           peer name veth1 address 02:00:00:00:00:02 netns $peer_netns
+
+    ip $nsA link set dev veth0 up
+    ip $nsB link set dev veth1 up
+
+    ip $nsA addr add 192.0.2.1/24 dev veth0
+    ip $nsB addr add 192.0.2.2/24 dev veth1
+
+    ip $nsA neigh add 192.0.2.2 lladdr 02:00:00:00:00:02 nud permanent dev veth0
+    ip $nsB neigh add 192.0.2.1 lladdr 02:00:00:00:00:01 nud permanent dev veth1
+
+    ip $nsA tunnel add tun0 mode gre local 192.0.2.1 remote 192.0.2.2
+    ip $nsB tunnel add tun1 mode gre local 192.0.2.2 remote 192.0.2.1
+
+    ip $nsA link set dev tun0 up
+    ip $nsB link set dev tun1 up
+
+    ip $nsA addr add 10.0.0.1/24 dev tun0
+    ip $nsB addr add 10.0.0.2/24 dev tun1
+
+    ip $nsA neigh add 10.0.0.2 lladdr 02:00:00:00:00:02 nud permanent dev tun0
+    ip $nsB neigh add 10.0.0.1 lladdr 02:00:00:00:00:01 nud permanent dev tun1
+
+    # BPF setup
+    $BPFTOOL net attach xdpgeneric  pinned $BPFFS_DIR/xdp_fill_meta_and_pass dev veth0
+    $BPFTOOL net attach tcx_ingress pinned $BPFFS_DIR/tcx_dump_meta_1        dev tun0
+
+    clear_trace $BPFFS_DIR/xdp_fill_meta_and_pass
+    clear_trace $BPFFS_DIR/tcx_dump_meta_1
+
+    # Test
+    $inB ping -c 1 -w 1 10.0.0.1
+    assert_successful_code
+
+    check_error $BPFFS_DIR/xdp_fill_meta_and_pass
+    check_error $BPFFS_DIR/tcx_dump_meta_1
+
+    check_trace $BPFFS_DIR/tcx_dump_meta_1 want_meta.txt
+}
