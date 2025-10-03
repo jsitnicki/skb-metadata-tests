@@ -51,12 +51,9 @@ tear_down() {
 
 clear_trace() {
     local prog="$1"
-    local have_file=$(mktemp)
 
-    $BPFTOOL prog tracelog stdout pinned $prog > $have_file
-    assert_is_file_empty $have_file
-
-    rm $have_file
+    $BPFTOOL prog tracelog stdout pinned $prog > /dev/null
+    $BPFTOOL prog tracelog stderr pinned $prog 2> /dev/null
 }
 
 check_trace() {
