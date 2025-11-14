@@ -331,6 +331,61 @@ test_decap_qinq() {
     check_trace $BPFFS_DIR/tcx_dump_meta_1 want_meta.txt
 }
 
+test_decap_mpls() {
+    set_test_title $FUNCNAME
+
+    # veth setup
+    local peer_netns="ns_$(random_str 3)"
+
+    ip netns add $peer_netns
+    trap "trap - RETURN; ip netns del $peer_netns" RETURN
+
+    sysctl -q net.ipv6.conf.all.disable_ipv6=1
+    ip netns exec $peer_netns sysctl -q net.ipv6.conf.all.disable_ipv6=1
+
+    ip link add name veth0 address 02:00:00:00:00:01 type veth \
+       peer name veth1 address 02:00:00:00:00:02 netns $peer_netns
+
+    ip link set dev veth0 up
+    ip -n $peer_netns link set dev veth1 up
+    ip -n $peer_netns link set dev lo up
+
+    ip addr add 10.0.0.1/24 dev veth0
+    ip neigh add 10.0.0.2 lladdr 02:00:00:00:00:02 nud permanent dev veth0
+
+    ip -n $peer_netns addr add 10.0.0.2/24 dev veth1
+    ip -n $peer_netns neigh add 10.0.0.1 lladdr 02:00:00:00:00:01 nud permanent dev veth1
+
+    # MPLS setup
+    sysctl -w net.mpls.platform_labels=65535
+    sysctl -w net.mpls.conf.veth0.input=1
+
+    ip netns exec $peer_netns sysctl -w net.mpls.platform_labels=65535
+    ip netns exec $peer_netns sysctl -w net.mpls.conf.veth1.input=1
+
+    ip                route change 10.0.0.0/24 encap mpls 100 via 10.0.0.2
+    ip -n $peer_netns route change 10.0.0.0/24 encap mpls 100 via 10.0.0.1
+
+    ip                -f mpls route add 100 dev lo
+    ip -n $peer_netns -f mpls route add 100 dev lo
+
+    # BPF setup
+    $BPFTOOL net attach xdpgeneric  pinned $BPFFS_DIR/xdp_fill_meta_and_pass dev veth0
+    $BPFTOOL net attach tcx_ingress pinned $BPFFS_DIR/tcx_dump_meta_1 dev lo
+
+    clear_trace $BPFFS_DIR/xdp_fill_meta_and_pass
+    clear_trace $BPFFS_DIR/tcx_dump_meta_1
+
+    # Test
+    ip netns exec $peer_netns ping -c 1 -w 1 10.0.0.1
+    assert_successful_code
+
+    check_error $BPFFS_DIR/xdp_fill_meta_and_pass
+    check_error $BPFFS_DIR/tcx_dump_meta_1
+
+    check_trace $BPFFS_DIR/tcx_dump_meta_1 want_meta.txt
+}
+
 test_decap_gre4() {
     set_test_title $FUNCNAME
 
@@ -344,7 +399,7 @@ test_decap_gre4() {
     ip netns add $peer_netns
     trap "trap - RETURN; ip netns del $peer_netns" RETURN
 
-    # VLAN setup
+    # Tunnel setup
     $inA sysctl -q net.ipv6.conf.all.disable_ipv6=1
     $inB sysctl -q net.ipv6.conf.all.disable_ipv6=1
 
