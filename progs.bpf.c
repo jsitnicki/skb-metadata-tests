@@ -125,6 +125,12 @@ int tcx_dump_meta_2(struct __sk_buff *ctx)
 	return tcx_dump_meta_dynptr(ctx);
 }
 
+SEC("tcx/egress")
+int tcx_dump_meta_1_egress(struct __sk_buff *ctx)
+{
+	return tcx_dump_meta_dynptr(ctx);
+}
+
 SEC("tcx/ingress")
 int tcx_dump_meta_pktptr(struct __sk_buff *ctx)
 {
