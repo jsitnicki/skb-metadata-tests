@@ -511,3 +511,87 @@ test_fwd() {
 
     check_trace $BPFFS_DIR/tcx_dump_meta_1_egress want_meta.txt
 }
+
+test_encap_vlan() {
+    set_test_title $FUNCNAME
+
+    sysctl -w -q net.ipv6.conf.all.disable_ipv6=1
+    sysctl -w -q net.ipv4.conf.all.forwarding=1
+
+    # netns setup
+    local nsA="ns_$(random_str 3)"
+    local nsB="ns_$(random_str 3)"
+    local inA="ip netns exec ${nsA}"
+    local inB="ip netns exec ${nsB}"
+
+    ip netns add ${nsA}
+    ip netns add ${nsB}
+
+    trap "trap - RETURN; ip netns del $nsA; ip netns del $nsB" RETURN
+
+    $inA sysctl -w -q net.ipv6.conf.all.disable_ipv6=1
+    $inB sysctl -w -q net.ipv6.conf.all.disable_ipv6=1
+
+    # veth setup
+
+    ip link add name toA address 02:00:00:00:10:01 type veth \
+       peer name fromA address 02:00:00:00:10:02 netns ${nsA}
+
+    ip link add name toB address 02:00:00:00:11:01 type veth \
+       peer name fromB address 02:00:00:00:11:02 netns ${nsB}
+
+    ip link set dev toA up
+    ip link set dev toB up
+
+    $inA ip link set dev fromA up
+    $inB ip link set dev fromB up
+
+    ip addr add 10.0.10.1/24 dev toA
+    ip addr add 10.0.11.1/24 dev toB
+
+    $inA ip addr add 10.0.10.2/24 dev fromA
+    $inB ip addr add 10.0.11.2/24 dev fromB
+
+    ip neigh add 10.0.10.2 lladdr 02:00:00:00:10:02 nud permanent dev toA
+    ip neigh add 10.0.11.2 lladdr 02:00:00:00:11:02 nud permanent dev toB
+
+    $inA ip neigh add 10.0.10.1 lladdr 02:00:00:00:10:01 nud permanent dev fromA
+    $inB ip neigh add 10.0.11.1 lladdr 02:00:00:00:11:01 nud permanent dev fromB
+
+    # routing setup
+
+    $inA ip route add default via 10.0.10.1
+    $inB ip route add default via 10.0.11.1
+
+    # vlan setup
+
+    ethtool -K toB rx-vlan-hw-parse off
+    ethtool -K toB tx-vlan-hw-insert off
+
+    ip link add name vlan0 link toB type vlan id 42
+    ip addr add 192.0.2.1/24 dev vlan0
+    ip link set dev vlan0 up
+
+    $inB ip link add name vlan1 link fromB type vlan id 42
+    $inB ip addr add 192.0.2.2/24 dev vlan1
+    $inB ip link set dev vlan1 up
+
+         ip neigh add 192.0.2.2 lladdr 02:00:00:00:11:02 nud permanent dev vlan0
+    $inB ip neigh add 192.0.2.1 lladdr 02:00:00:00:11:01 nud permanent dev vlan1
+
+    # bpf setup
+    $BPFTOOL net attach xdpgeneric pinned $BPFFS_DIR/xdp_fill_meta_and_pass dev toA
+    $BPFTOOL net attach tcx_egress pinned $BPFFS_DIR/tcx_dump_meta_1_egress dev toB
+
+    # ping test
+    clear_trace $BPFFS_DIR/xdp_fill_meta_and_pass
+    clear_trace $BPFFS_DIR/tcx_dump_meta_1_egress
+
+    $inA ping -c 1 -w 1 192.0.2.2
+    assert_successful_code
+
+    check_error $BPFFS_DIR/xdp_fill_meta_and_pass
+    check_error $BPFFS_DIR/tcx_dump_meta_1_egress
+
+    check_trace $BPFFS_DIR/tcx_dump_meta_1_egress want_meta.txt
+}
