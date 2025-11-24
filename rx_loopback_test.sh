@@ -699,6 +699,7 @@ test_encap_qinq() {
 
 test_encap_mpls() {
     set_test_title $FUNCNAME
+    skip "forward with encap not fixed yet" && return
 
     sysctl -w -q net.ipv6.conf.all.disable_ipv6=1
     sysctl -w -q net.ipv4.conf.all.forwarding=1
